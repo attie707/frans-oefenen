@@ -7,8 +7,8 @@
 # Optional settings (put them in front of the command, e.g.  CTID=150 MEM=512 bash -c "$(curl ...)"):
 #   CTID      container ID              (default: next free ID)
 #   CT_NAME   hostname                  (default: frans-oefenen)
-#   MEM       RAM in MB                 (default: 256)
-#   DISK      disk in GB                (default: 2)
+#   MEM       RAM in MB                 (default: 1024, room for the speech engine)
+#   DISK      disk in GB                (default: 4)
 #   CORES     CPU cores                 (default: 1)
 #   BRIDGE    network bridge            (default: vmbr0)
 #   IP        "dhcp" or e.g. "192.168.1.50/24,gw=192.168.1.1"   (default: dhcp)
@@ -18,8 +18,8 @@ set -euo pipefail
 
 REPO="${REPO:-https://github.com/attie707/frans-oefenen.git}"
 CT_NAME="${CT_NAME:-frans-oefenen}"
-MEM="${MEM:-256}"
-DISK="${DISK:-2}"
+MEM="${MEM:-1024}"
+DISK="${DISK:-4}"
 CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP="${IP:-dhcp}"
@@ -76,67 +76,11 @@ done
 ok "Network is up"
 
 # ---- install inside the container ----
-SETUP=$(mktemp)
-cat > "$SETUP" <<EOF
-set -e
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get -y -qq upgrade >/dev/null
-apt-get install -y -qq python3 git ca-certificates >/dev/null
-id frans >/dev/null 2>&1 || useradd --system --home /var/lib/frans-oefenen --shell /usr/sbin/nologin frans
-mkdir -p /var/lib/frans-oefenen && chown frans: /var/lib/frans-oefenen
-rm -rf /opt/frans-oefenen
-git clone --depth 1 "$REPO" /opt/frans-oefenen
-
-cat > /etc/systemd/system/frans-oefenen.service <<'UNIT'
-[Unit]
-Description=Frans oefenen
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=frans
-WorkingDirectory=/opt/frans-oefenen/app
-Environment=DATA_DIR=/var/lib/frans-oefenen PORT=$PORT QUIET=1
-ExecStart=/usr/bin/python3 server.py
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat > /usr/local/bin/update <<'UPD'
-#!/usr/bin/env bash
-set -e
-export LANG=C.UTF-8 LC_ALL=C.UTF-8
-echo "Updating Frans oefenen..."
-git -C /opt/frans-oefenen pull --ff-only
-systemctl restart frans-oefenen
-echo "Done. Scores and accounts are kept in /var/lib/frans-oefenen"
-UPD
-chmod +x /usr/local/bin/update
-
-cat > /usr/local/bin/backup <<'BAK'
-#!/usr/bin/env bash
-set -e
-f=/root/frans-backup-\$(date +%F).db
-python3 -c "import sqlite3;s=sqlite3.connect('/var/lib/frans-oefenen/frans.db');d=sqlite3.connect('\$f');s.backup(d)"
-echo "Backup written to \$f"
-BAK
-chmod +x /usr/local/bin/backup
-
-systemctl daemon-reload
-systemctl enable --now frans-oefenen >/dev/null 2>&1
-EOF
-say "Installing Python and the app (takes a minute)"
-pct push "$CTID" "$SETUP" /root/setup.sh
-rm -f "$SETUP"
-pct exec "$CTID" -- bash /root/setup.sh
-pct exec "$CTID" -- rm -f /root/setup.sh
-sleep 2
-pct exec "$CTID" -- systemctl is-active --quiet frans-oefenen || die "The service did not start. Check: pct exec $CTID -- journalctl -u frans-oefenen"
+say "Installing the app and the Piper speech engine (takes a few minutes)"
+pct exec "$CTID" -- bash -c "export LANG=C.UTF-8 LC_ALL=C.UTF-8 DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get -y -qq upgrade >/dev/null && apt-get install -y -qq git ca-certificates curl >/dev/null"
+APPNAME=$(basename "$REPO" .git)
+pct exec "$CTID" -- git clone -q --depth 1 "$REPO" "/opt/$APPNAME"
+pct exec "$CTID" -- bash "/opt/$APPNAME/deploy/setup.sh"
 ok "App is running"
 
 CT_IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')

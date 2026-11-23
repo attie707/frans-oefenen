@@ -27,15 +27,31 @@ function rank(xp) {
   return { name: RANKS[i][1], next: next ? next[1] : null, pct: next ? Math.round(100 * (xp - RANKS[i][0]) / (next[0] - RANKS[i][0])) : 100, need: next ? next[0] - xp : 0 };
 }
 
-// uitspraak via de browser (gratis, werkt offline als er een Franse stem is)
+// uitspraak: eerst de server (Piper/Azure, natuurlijke stem), anders de stem van de browser
+let TTS_SERVER = false;
 let frVoice = null;
 function loadVoices() { const v = speechSynthesis.getVoices(); frVoice = v.find(x => x.lang === "fr-FR") || v.find(x => x.lang.startsWith("fr")) || null; }
 if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
-function say(text, rate = 0.9) {
+const player = new Audio();
+player.preservesPitch = true;
+function browserSay(text, rate) {
   if (!("speechSynthesis" in window)) return toast("Je browser kan niet voorlezen");
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text); u.lang = "fr-FR"; if (frVoice) u.voice = frVoice; u.rate = rate;
   speechSynthesis.speak(u);
+}
+async function say(text, slow = false) {
+  if (typeof slow === "number") slow = slow < 0.8;
+  if (TTS_SERVER) {
+    try {
+      player.pause();
+      player.src = "/api/tts?t=" + encodeURIComponent(text);
+      player.defaultPlaybackRate = player.playbackRate = slow ? 0.7 : 1;
+      await player.play();
+      return;
+    } catch (e) { /* valt terug op de browser */ }
+  }
+  browserSay(text, slow ? 0.55 : 0.9);
 }
 const sayBtn = text => `<button class="say" title="Laat horen" data-say="${esc(text)}">🔊</button>`;
 document.addEventListener("click", e => { const b = e.target.closest("[data-say]"); if (b) say(b.dataset.say); });
@@ -52,6 +68,7 @@ async function render() {
   if (cleanup) { cleanup(); cleanup = null; }
   const st = await api("state").catch(() => ({}));
   ME = st.user;
+  TTS_SERVER = !!st.tts;
   $("#nav").hidden = !ME;
   $("#nav-admin").hidden = !(ME && ME.role === "admin");
   if (st.setup_needed) return viewSetup();
@@ -246,7 +263,7 @@ async function viewListen(arg) {
   const [kind, focus] = (arg || "").split(":");
   if (!kind || !focus) {
     const h = await api("home");
-    const noVoice = "speechSynthesis" in window && speechSynthesis.getVoices().length && !frVoice;
+    const noVoice = !TTS_SERVER && "speechSynthesis" in window && speechSynthesis.getVoices().length && !frVoice;
     app.innerHTML = `<h1>🎧 Luisteren</h1>
       ${noVoice ? `<p class="error">Dit apparaat heeft geen Franse stem. Het kan raar klinken. Op een telefoon kun je in de instellingen een Franse stem downloaden.</p>` : ""}
       <h2>Wat wil je doen?</h2>
@@ -285,7 +302,7 @@ async function viewListen(arg) {
       app.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(q.options[+b.dataset.i], +b.dataset.i));
     }
     $("#play").onclick = () => say(q.prompt.say);
-    $("#slow").onclick = () => say(q.prompt.say, 0.55);
+    $("#slow").onclick = () => say(q.prompt.say, true);
     setTimeout(() => say(q.prompt.say), 250);
   }
   async function answer(given, idx) {
@@ -313,7 +330,7 @@ async function viewListen(arg) {
     else if (kind !== "dictee" && answered && e.key === "Enter") { e.preventDefault(); next(); }
   };
   document.addEventListener("keydown", key);
-  cleanup = () => { document.removeEventListener("keydown", key); if ("speechSynthesis" in window) speechSynthesis.cancel(); };
+  cleanup = () => { document.removeEventListener("keydown", key); player.pause(); if ("speechSynthesis" in window) speechSynthesis.cancel(); };
   next();
 }
 

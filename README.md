@@ -56,6 +56,13 @@ The first visitor can create the admin account, so do step 1 straight away.
 | Motivation | XP, ranks (Débutant → Légende), daily goal of 20 questions, day streak, 🔊 pronunciation (browser voice). |
 | Scores | 14-day chart, verb × person grid, weak points, recent mistakes, **CSV export** (opens correctly in Excel). Admins can view every student. |
 
+## Speech
+- **Piper** (installed automatically, free and local): voice `fr_FR-siwis-medium`.
+- **Azure neural voices** (optional, most natural: `fr-FR-DeniseNeural`): put `AZURE_TTS_KEY=...` and
+  `AZURE_TTS_REGION=westeurope` in `/etc/oefenen-tts.env` inside the container and run `update`. The free tier is plenty, because
+  every sound is generated once and then cached.
+- If neither is available, the browser's own voice is used.
+
 ## Practice away from home
 Don't open a port on the router. Install **Tailscale** on the Docker host (or as a Proxmox LXC)
 and on his phone, then use the Tailscale IP. If you ever want to open it to other students on the

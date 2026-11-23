@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import content as C
+from tts import TTS
 
 PORT = int(os.environ.get("PORT", "8000"))
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
@@ -34,6 +35,7 @@ SPEED_SECONDS = 60
 XP_CORRECT, XP_ALMOST, XP_SPEED_BONUS, XP_LEVEL_UP = 10, 4, 5, 50
 
 os.makedirs(DATA_DIR, exist_ok=True)
+SPEECH = TTS(DATA_DIR, "fr-FR", "fr-FR-DeniseNeural", C.all_phrases())
 
 
 # ---------------- database ----------------
@@ -199,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", (headers or {}).pop("Cache-Control", "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
@@ -296,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_get_state(self, con, qs):
         setup = con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         u = None if setup else self.user(con, required=False)
-        return {"setup_needed": setup,
+        return {"setup_needed": setup, "tts": SPEECH.engine,
                 "user": {"id": u["id"], "name": u["name"], "role": u["role"]} if u else None}
 
     def api_post_setup(self, con, qs):
@@ -359,6 +361,13 @@ class Handler(BaseHTTPRequestHandler):
         h, salt = hash_pw(b["new"])
         con.execute("UPDATE users SET pw_hash=?, salt=? WHERE id=?", (h, salt, me["id"]))
         return {"ok": True}
+
+    def api_get_tts(self, con, qs):
+        self.user(con)
+        res = SPEECH.get(qs.get("t", [""])[0])
+        if not res:
+            raise ApiError(404, "Geen geluid")
+        self.send(200, res[0], res[1], {"Cache-Control": "private, max-age=604800"})
 
     # ---------------- beheer ----------------
     def api_get_users(self, con, qs):
@@ -584,6 +593,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
+    SPEECH.prewarm()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Frans oefenen draait op http://0.0.0.0:{PORT}  (database: {DB_PATH})", flush=True)
     try:

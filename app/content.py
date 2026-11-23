@@ -284,3 +284,8 @@ def make_listen_question(item_id, kind):
     random.shuffle(opts)
     q["options"] = opts
     return q
+
+
+def all_phrases():
+    """Alles wat de app ooit uitspreekt (voor de spraak-cache)."""
+    return {phrase(i["verb"], i["pron"], i["neg"]) for i in ITEMS.values()}
