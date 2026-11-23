@@ -1,0 +1,15 @@
+services:
+  frans:
+    build: .
+    container_name: frans-oefenen
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - frans-data:/data        # database (scores, accounts) survives rebuilds
+    environment:
+      - TZ=Europe/Amsterdam
+    mem_limit: 128m
+
+volumes:
+  frans-data:

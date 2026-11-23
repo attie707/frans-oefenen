@@ -1,0 +1,384 @@
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const app = $("#app");
+let ME = null;
+
+// ---------- helpers ----------
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch("/api/" + path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== "login") { ME = null; location.hash = "#/"; render(); throw new Error(data.error); }
+  if (!r.ok) throw new Error(data.error || "Er ging iets mis");
+  return data;
+}
+function toast(msg, ms = 2600) {
+  const t = $("#toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const PRAISE = ["Très bien !", "Parfait !", "Super !", "Bravo !", "Excellent !", "Génial !", "C'est ça !"];
+const OOPS = ["Oeps!", "Pas grave, kijk even goed:", "Helaas!", "Dommage!"];
+const RANKS = [[0, "Débutant"], [200, "Apprenti"], [500, "Bon élève"], [1000, "Champion"], [2000, "Expert"], [4000, "Maître"], [8000, "Légende"]];
+function rank(xp) {
+  let i = 0; while (i + 1 < RANKS.length && xp >= RANKS[i + 1][0]) i++;
+  const next = RANKS[i + 1];
+  return { name: RANKS[i][1], next: next ? next[1] : null, pct: next ? Math.round(100 * (xp - RANKS[i][0]) / (next[0] - RANKS[i][0])) : 100, need: next ? next[0] - xp : 0 };
+}
+
+// uitspraak via de browser (gratis, werkt offline als er een Franse stem is)
+let frVoice = null;
+function loadVoices() { const v = speechSynthesis.getVoices(); frVoice = v.find(x => x.lang === "fr-FR") || v.find(x => x.lang.startsWith("fr")) || null; }
+if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
+function say(text) {
+  if (!("speechSynthesis" in window)) return toast("Je browser kan niet voorlezen");
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text); u.lang = "fr-FR"; if (frVoice) u.voice = frVoice; u.rate = 0.9;
+  speechSynthesis.speak(u);
+}
+const sayBtn = text => `<button class="say" title="Laat horen" data-say="${esc(text)}">🔊</button>`;
+document.addEventListener("click", e => { const b = e.target.closest("[data-say]"); if (b) say(b.dataset.say); });
+
+function conjTable(t) {
+  return `<div class="small muted" style="margin-top:10px"><b>${esc(t.verb)}</b> (${esc(t.nl)})</div>
+  <table class="conj">${t.rows.map(r => `<tr class="${r.hl ? "hl" : ""}"><td>${esc(r.pron)}</td><td>${esc(r.form)}</td></tr>`).join("")}</table>`;
+}
+
+// ---------- router ----------
+window.addEventListener("hashchange", render);
+let cleanup = null;
+async function render() {
+  if (cleanup) { cleanup(); cleanup = null; }
+  const st = await api("state").catch(() => ({}));
+  ME = st.user;
+  $("#nav").hidden = !ME;
+  $("#nav-admin").hidden = !(ME && ME.role === "admin");
+  if (st.setup_needed) return viewSetup();
+  if (!ME) return viewLogin();
+  const [route, arg] = location.hash.replace(/^#\/?/, "").split("/");
+  const views = { "": viewHome, meerkeuze: viewMC, spelling: viewSpell, snel: viewSpeed, scores: viewScores, beheer: viewAdmin, account: viewAccount };
+  (views[route] || viewHome)(arg);
+}
+
+// ---------- inloggen ----------
+function viewSetup() {
+  app.innerHTML = `<div class="card" style="max-width:420px;margin:30px auto">
+    <h1>Welkom! 👋</h1><p class="muted">Maak eerst een beheerdersaccount aan (voor ouder of docent). Daarna kun je leerlingen toevoegen.</p>
+    <form id="f"><label>Naam</label><input name="name" required>
+    <label>Gebruikersnaam</label><input name="username" autocapitalize="none" required>
+    <label>Wachtwoord (min. 6 tekens)</label><input name="password" type="password" required>
+    <div class="error" id="err"></div><br><button>Account aanmaken</button></form></div>`;
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    try { await api("setup", Object.fromEntries(new FormData(e.target))); location.hash = "#/beheer"; render(); }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+}
+function viewLogin() {
+  app.innerHTML = `<div class="card" style="max-width:400px;margin:30px auto">
+    <h1>Bonjour ! 🇫🇷</h1>
+    <form id="f"><label>Gebruikersnaam</label><input name="username" autocapitalize="none" autocomplete="username" required>
+    <label>Wachtwoord</label><input name="password" type="password" autocomplete="current-password" required>
+    <div class="error" id="err"></div><br><button style="width:100%">Inloggen</button></form></div>`;
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    try { await api("login", Object.fromEntries(new FormData(e.target))); location.hash = "#/"; render(); }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+}
+
+// ---------- start ----------
+async function viewHome() {
+  const h = await api("home");
+  const r = rank(h.xp);
+  const goalPct = Math.min(100, Math.round(100 * h.today / h.goal));
+  const nextLevel = h.levels.filter(l => l.unlocked).pop();
+  app.innerHTML = `
+    <h1>Salut ${esc(h.name)} !</h1>
+    <div class="chips">
+      <span class="chip">🔥 ${h.streak} ${h.streak === 1 ? "dag" : "dagen"} op rij</span>
+      <span class="chip">⭐ ${h.xp} XP · ${esc(r.name)}</span>
+      <span class="chip">⚡ Record: ${h.speed_best}</span>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="spread"><b>Doel van vandaag</b><span class="muted">${h.today} / ${h.goal} vragen ${goalPct >= 100 ? "✅" : ""}</span></div>
+      <div class="bar ${goalPct >= 100 ? "good" : ""}" style="margin-top:8px"><i style="width:${goalPct}%"></i></div>
+      ${r.next ? `<div class="small muted" style="margin-top:10px">Nog ${r.need} XP tot <b>${esc(r.next)}</b></div>` : `<div class="small muted" style="margin-top:10px">Hoogste rang bereikt. Respect! 👑</div>`}
+    </div>
+    <div class="grid">
+      <a class="card tile" href="#/meerkeuze"><div class="ico">🎯</div><h3>Meerkeuze</h3><div class="muted small">Kies het goede antwoord uit 5. Toets 1–5 werkt ook.</div></a>
+      <a class="card tile" href="#/spelling"><div class="ico">✍️</div><h3>Spelling</h3><div class="muted small">Zelf typen. Nu op niveau ${nextLevel.n}: ${esc(nextLevel.name)}</div></a>
+      <a class="card tile" href="#/snel"><div class="ico">⚡</div><h3>Snelheidsronde</h3><div class="muted small">60 seconden. Hoeveel heb jij goed?</div></a>
+      <a class="card tile" href="#/scores"><div class="ico">📊</div><h3>Mijn scores</h3><div class="muted small">${h.weak_count ? `${h.weak_count} dingen om nog te oefenen` : "Bekijk je voortgang"}</div></a>
+    </div>`;
+}
+
+// ---------- gedeelde vraag-logica ----------
+function promptHTML(q) {
+  if (q.fmt === "fill") return `<div class="prompt"><div class="fr">${esc(q.prompt.fr)}</div><div class="inf">(${esc(q.prompt.inf)})</div><div class="nl">${esc(q.prompt.nl)}</div></div>`;
+  return `<div class="prompt"><div class="small muted">Vertaal naar het Frans:</div><div class="nl big">${esc(q.prompt.nl)}</div></div>`;
+}
+function feedbackHTML(res, given) {
+  const t = res.result === "correct" ? pick(PRAISE) : res.result === "almost" ? "Bijna! Let op de accenten" : pick(OOPS);
+  const sol = res.accepted.length > 1 ? res.accepted.join("  /  ") : res.answer;
+  return `<div class="feedback ${res.result} pop">
+    <div class="title">${res.result === "correct" ? "✅" : res.result === "almost" ? "🟡" : "❌"} ${esc(t)} ${res.xp_gained ? `<span class="small muted">+${res.xp_gained} XP</span>` : ""}</div>
+    ${res.result !== "correct" ? `${given !== undefined ? `<div class="small muted">Jij: <s>${esc(given) || "(leeg)"}</s></div>` : ""}<div class="sol">${esc(sol)} ${sayBtn(res.say)}</div>` : `<div>${esc(res.say)} ${sayBtn(res.say)}</div>`}
+    ${res.result !== "correct" ? conjTable(res.table) : ""}
+    ${res.unlocked ? `<div style="margin-top:10px;font-weight:700">🎉 Nieuw niveau vrijgespeeld: ${esc(res.unlocked.name)}! (+50 XP)</div>` : ""}
+  </div>`;
+}
+function sessionBar(s) { return `<span class="chip">✅ ${s.ok} / ${s.n}</span>`; }
+
+// ---------- meerkeuze ----------
+async function viewMC(focus) {
+  if (!focus) {
+    const h = await api("home");
+    app.innerHTML = `<h1>🎯 Meerkeuze</h1><p class="muted">Wat wil je oefenen?</p>
+      <div class="grid">${h.focus.map(f => `<a class="card tile" href="#/meerkeuze/${f.key}"><h3>${esc(f.name)}</h3>
+      <div class="muted small">${f.key === "weak" ? `${h.weak_count} keer fout gegaan` : f.key === "etre_avoir" ? "zijn & hebben" : f.key === "er" ? "parler, jouer, manger …" : "de hele mix"}</div></a>`).join("")}</div>`;
+    return;
+  }
+  const s = { n: 0, ok: 0 };
+  let q, answered = false;
+  async function next() {
+    answered = false;
+    q = await api("question", { mode: "mc", focus });
+    app.innerHTML = `<div class="qhead"><a href="#/meerkeuze">← Stoppen</a>${sessionBar(s)}</div>
+      <div class="card">${q.note ? `<p class="small muted">${esc(q.note)}</p>` : ""}${promptHTML(q)}
+      <div class="options">${q.options.map((o, i) => `<button class="opt" data-i="${i}"><span class="n">${i + 1}</span>${esc(o)}</button>`).join("")}</div>
+      <div id="fb"></div></div>`;
+    app.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(+b.dataset.i));
+  }
+  async function answer(i) {
+    if (answered) return; answered = true;
+    const res = await api("answer", { qid: q.qid, answer: q.options[i] });
+    s.n++; if (res.result === "correct") s.ok++;
+    app.querySelectorAll(".opt").forEach((b, j) => {
+      b.disabled = true;
+      if (q.options[j] === res.answer || res.accepted.includes(q.options[j])) b.classList.add("right");
+      else if (j === i) b.classList.add("wrong");
+    });
+    if (res.result !== "correct") $(".card").classList.add("shake");
+    $(".qhead .chip").outerHTML = sessionBar(s);
+    $("#fb").innerHTML = feedbackHTML(res) + `<button class="next" id="nx">Volgende ↵</button>`;
+    $("#nx").onclick = next; $("#nx").focus();
+    if (res.result === "correct") say(res.say);
+  }
+  const key = e => {
+    if (!answered && /^[1-5]$/.test(e.key) && q) answer(+e.key - 1);
+    else if (answered && e.key === "Enter") { e.preventDefault(); next(); }
+  };
+  document.addEventListener("keydown", key);
+  cleanup = () => document.removeEventListener("keydown", key);
+  next();
+}
+
+// ---------- spelling ----------
+function accentBar() {
+  return `<div class="accents">${["é", "è", "ê", "à", "ç", "ô", "î", "'"].map(c => `<button type="button" data-acc="${c}">${c}</button>`).join("")}</div>`;
+}
+function bindAccents(input) {
+  app.querySelectorAll("[data-acc]").forEach(b => b.onclick = () => {
+    const [a, z] = [input.selectionStart, input.selectionEnd];
+    input.value = input.value.slice(0, a) + b.dataset.acc + input.value.slice(z);
+    input.focus(); input.setSelectionRange(a + 1, a + 1);
+  });
+}
+async function viewSpell(level) {
+  if (!level) {
+    const h = await api("home");
+    app.innerHTML = `<h1>✍️ Spelling</h1><p class="muted">Haal 80% goed van je laatste 20 antwoorden om het volgende niveau vrij te spelen.</p>
+      <div class="grid">${h.levels.map(l => `<a class="card tile ${l.unlocked ? "" : "locked"}" ${l.unlocked ? `href="#/spelling/${l.n}"` : ""}>
+        <div class="spread"><h3>${l.unlocked ? "" : "🔒 "}${l.n}. ${esc(l.name)}</h3>${l.passed ? "✅" : ""}</div>
+        <div class="muted small">${esc(l.desc)}</div>
+        ${l.unlocked ? `<div class="bar ${l.passed ? "good" : ""}" style="margin-top:10px"><i style="width:${l.answered ? l.score : 0}%"></i></div>
+        <div class="small muted" style="margin-top:4px">${l.answered ? `${l.score}% van laatste ${l.answered}` : "nog niet geoefend"}</div>` : ""}
+      </a>`).join("")}</div>`;
+    return;
+  }
+  const s = { n: 0, ok: 0 };
+  let q, answered = false;
+  async function next() {
+    answered = false;
+    try { q = await api("question", { mode: "spell", level: +level }); }
+    catch (e) { toast(e.message); location.hash = "#/spelling"; return; }
+    app.innerHTML = `<div class="qhead"><a href="#/spelling">← Stoppen</a><span class="small muted">Niveau ${level}</span>${sessionBar(s)}</div>
+      <div class="card">${promptHTML(q)}
+      <form class="answer-row" id="f"><input id="inp" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="${q.fmt === "fill" ? "vorm" : "Franse zin"}"><button>OK</button></form>
+      ${accentBar()}<div id="fb"></div></div>`;
+    const inp = $("#inp"); inp.focus(); bindAccents(inp);
+    $("#f").onsubmit = e => { e.preventDefault(); answered ? next() : answer(inp.value); };
+  }
+  async function answer(given) {
+    if (answered) return; answered = true;
+    const res = await api("answer", { qid: q.qid, answer: given });
+    s.n++; if (res.result === "correct") s.ok++;
+    $(".qhead .chip").outerHTML = sessionBar(s);
+    const inp = $("#inp"); inp.readOnly = true;
+    inp.style.borderColor = res.result === "correct" ? "var(--good)" : res.result === "almost" ? "var(--warn)" : "var(--bad)";
+    if (res.result === "wrong") $(".card").classList.add("shake");
+    $("#fb").innerHTML = feedbackHTML(res, given) + `<button class="next" id="nx">Volgende ↵</button>`;
+    $("#nx").onclick = next; inp.focus();
+    if (res.result === "correct") say(res.say);
+    if (res.unlocked) toast(`🎉 Niveau ${res.unlocked.n} vrijgespeeld!`, 4000);
+  }
+  next();
+}
+
+// ---------- snelheidsronde ----------
+async function viewSpeed() {
+  const h = await api("home");
+  app.innerHTML = `<h1>⚡ Snelheidsronde</h1><div class="card center">
+    <p>60 seconden meerkeuze. Elk goed antwoord = 1 punt + bonus-XP.<br>Gebruik toetsen <b>1–5</b> voor extra snelheid!</p>
+    <p class="muted">Jouw record: <b>${h.speed_best}</b></p><button id="go" style="font-size:20px;padding:14px 30px">Start!</button></div>`;
+  $("#go").onclick = start;
+  let timer, q, sid, end, busy = false;
+  async function start() {
+    const r = await api("speed/start", {});
+    sid = r.sid; end = Date.now() + r.seconds * 1000;
+    app.innerHTML = `<div class="qhead"><span class="timer" id="tm">60</span><span class="chip" id="sc">0 punten</span></div><div class="card" id="qc"></div>`;
+    timer = setInterval(tick, 200); tick(); next();
+  }
+  function tick() {
+    const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+    const t = $("#tm"); if (t) { t.textContent = left; t.classList.toggle("low", left <= 10); }
+    if (left <= 0) finish();
+  }
+  async function next() {
+    q = await api("question", { mode: "mc", focus: "all", speed: sid });
+    busy = false;
+    $("#qc").innerHTML = promptHTML(q) + `<div class="options">${q.options.map((o, i) => `<button class="opt" data-i="${i}"><span class="n">${i + 1}</span>${esc(o)}</button>`).join("")}</div>`;
+    app.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(+b.dataset.i));
+  }
+  async function answer(i) {
+    if (busy || !sid) return; busy = true;
+    const res = await api("answer", { qid: q.qid, answer: q.options[i] });
+    $("#qc").classList.remove("flash-ok", "flash-bad"); void $("#qc").offsetWidth;
+    $("#qc").classList.add(res.result === "correct" ? "flash-ok" : "flash-bad");
+    if (res.speed_score !== null) $("#sc").textContent = `${res.speed_score} punten`;
+    if (res.result !== "correct") toast(`✗ ${res.say}`, 1200);
+    if (Date.now() < end) next();
+  }
+  async function finish() {
+    clearInterval(timer); if (!sid) return;
+    const id = sid; sid = null;
+    const r = await api("speed/finish", { sid: id });
+    app.innerHTML = `<h1>⚡ Tijd is om!</h1><div class="card center">
+      <div class="big-score">${r.score}</div><p>${r.record ? "🏆 <b>Nieuw record!</b>" : `Record: ${r.best}`}</p>
+      <div class="row" style="justify-content:center"><a class="btn" href="#/snel" onclick="setTimeout(render)">Nog een keer</a><a class="btn secondary" href="#/">Home</a></div></div>`;
+  }
+  const key = e => { if (sid && /^[1-5]$/.test(e.key)) answer(+e.key - 1); };
+  document.addEventListener("keydown", key);
+  cleanup = () => { clearInterval(timer); document.removeEventListener("keydown", key); };
+}
+
+// ---------- scores ----------
+const fmtDay = d => { const [, m, dd] = d.split("-"); return `${+dd}/${+m}`; };
+function heatClass(p) { return p >= 80 ? "g" : p >= 50 ? "w" : "b"; }
+async function viewScores(uid) {
+  const s = await api("stats" + (uid ? `?user=${encodeURIComponent(uid)}` : ""));
+  const maxN = Math.max(1, ...s.days.map(d => d.n));
+  const self = !uid || +uid === ME.id;
+  const heatRows = Object.entries(s.heat);
+  app.innerHTML = `
+    <div class="spread"><h1>📊 ${self ? "Mijn scores" : "Scores van " + esc(s.user.name)}</h1>
+      <a class="btn secondary" href="/api/export.csv${uid ? `?user=${encodeURIComponent(uid)}` : ""}">⬇ Exporteer (CSV)</a></div>
+    <div class="chips">
+      <span class="chip">📝 ${s.total} antwoorden</span>
+      <span class="chip">🎯 ${s.pct ?? "–"}% goed</span>
+      <span class="chip">🔥 ${s.streak} ${s.streak === 1 ? "dag" : "dagen"} op rij</span>
+      <span class="chip">⭐ ${s.xp} XP · ${esc(rank(s.xp).name)}</span>
+      <span class="chip">⚡ Record ${s.speed_best}</span>
+    </div>
+
+    <div class="card"><h3>Laatste 14 dagen</h3><div class="small muted">Aantal vragen per dag (wijs een balk aan voor het percentage goed)</div>
+      <div class="days" id="days">${s.days.map(d => `<div class="d" data-tip="${fmtDay(d.day)}: ${d.n} vragen${d.n ? `, ${d.pct}% goed` : ""}"><i style="height:${Math.round(100 * d.n / maxN)}%"></i></div>`).join("")}</div>
+      <div class="days-x">${s.days.map((d, i) => `<span>${i % 2 === 1 ? fmtDay(d.day) : ""}</span>`).join("")}</div>
+    </div>
+
+    <h2>Niveaus spelling</h2><div class="card">${s.levels.map(l => `<div class="lvl"><span style="width:180px">${l.unlocked ? "" : "🔒 "}${l.n}. ${esc(l.name)}</span>
+      <div class="bar ${l.passed ? "good" : ""}"><i style="width:${l.answered ? l.score : 0}%"></i></div><span class="small muted" style="width:70px;text-align:right">${l.answered ? l.score + "%" : "–"}${l.passed ? " ✅" : ""}</span></div>`).join("")}</div>
+
+    <h2>Per werkwoord en persoon</h2>
+    <div class="card">${heatRows.length ? `<div class="tablewrap"><table class="heat"><tr><th></th>${s.prons.map(p => `<th>${p === "il" ? "il/elle/on" : p === "ils" ? "ils/elles" : p}</th>`).join("")}</tr>
+      ${heatRows.map(([v, row]) => `<tr><th class="v">${esc(v)}</th>${s.prons.map(p => row[p] ? `<td class="${heatClass(row[p].pct)}" data-tip="${esc(v)} · ${p}: ${row[p].pct}% goed (${row[p].n}×)">${row[p].pct}</td>` : `<td class="none">·</td>`).join("")}</tr>`).join("")}
+      </table></div>
+      <div class="legend"><span style="--c:#0ca30c">✓ 80–100% goed</span><span style="--c:#fab219">~ 50–79%</span><span style="--c:#d03b3b">✗ onder 50%</span><span style="--c:#f0efec">nog niet geoefend</span></div>`
+      : `<p class="muted">Nog niets geoefend.</p>`}</div>
+
+    <h2>Moet nog geoefend worden</h2>
+    <div class="card">${s.weak.length ? `<div class="tablewrap"><table class="list"><tr><th>Frans</th><th>Nederlands</th><th>Fout</th><th>Onderdeel</th></tr>
+      ${s.weak.map(w => `<tr><td><b>${esc(w.fr)}</b> ${sayBtn(w.fr)}</td><td>${esc(w.nl)}</td><td>${w.wrong}× van ${w.seen}</td><td class="small muted">${w.mode}${w.box >= 3 ? " · gaat al beter" : ""}</td></tr>`).join("")}
+      </table></div>` : `<p class="muted">Niets! Très bien 👏</p>`}</div>
+
+    <h2>Recente fouten</h2>
+    <div class="card">${s.mistakes.length ? `<div class="tablewrap"><table class="list"><tr><th>Vraag</th><th>Antwoord</th><th>Goed is</th></tr>
+      ${s.mistakes.map(m => `<tr><td>${esc(m.prompt)}</td><td><s>${esc(m.given) || "(leeg)"}</s>${m.result === 1 ? " <span class='small muted'>(accent)</span>" : ""}</td><td><b>${esc(m.expected)}</b></td></tr>`).join("")}
+      </table></div>` : `<p class="muted">Geen fouten. Wauw.</p>`}</div>`;
+  bindTips();
+}
+function bindTips() {
+  let tip;
+  app.querySelectorAll("[data-tip]").forEach(el => {
+    el.addEventListener("mouseenter", () => { tip = document.createElement("div"); tip.className = "tip"; tip.textContent = el.dataset.tip; document.body.append(tip); });
+    el.addEventListener("mousemove", e => { if (tip) { tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + "px"; tip.style.top = (e.clientY - 34) + "px"; } });
+    el.addEventListener("mouseleave", () => { tip?.remove(); tip = null; });
+    el.addEventListener("click", () => toast(el.dataset.tip));   // tik op mobiel
+  });
+}
+
+// ---------- beheer ----------
+async function viewAdmin() {
+  if (ME.role !== "admin") { location.hash = "#/"; return; }
+  const users = await api("users");
+  const ago = ts => { if (!ts) return "nooit"; const d = Math.floor((Date.now() / 1000 - ts) / 86400); return d === 0 ? "vandaag" : d === 1 ? "gisteren" : `${d} dagen geleden`; };
+  app.innerHTML = `<div class="spread"><h1>⚙️ Beheer</h1><a class="btn secondary" href="/api/export.csv?user=all">⬇ Export alles (CSV)</a></div>
+    <div class="card"><div class="tablewrap"><table class="list"><tr><th>Naam</th><th>Rol</th><th>Vandaag</th><th>Totaal</th><th>Laatst actief</th><th></th></tr>
+    ${users.map(u => `<tr><td><b>${esc(u.name)}</b><div class="small muted">${esc(u.username)}</div></td><td>${u.role === "admin" ? "ouder/docent" : "leerling"}</td>
+      <td>${u.today}</td><td>${u.total}</td><td class="small">${ago(u.last_ts)}</td>
+      <td><div class="row"><a class="btn" style="padding:6px 10px" href="#/scores/${u.id}">Scores</a>
+      <button class="link" data-pw="${u.id}" data-name="${esc(u.name)}">Wachtwoord</button>
+      ${u.id !== ME.id ? `<button class="link" style="color:var(--bad)" data-del="${u.id}" data-name="${esc(u.name)}">Verwijder</button>` : ""}</div></td></tr>`).join("")}
+    </table></div></div>
+    <h2>Leerling toevoegen</h2>
+    <form class="card" id="f"><div class="grid">
+      <div><label>Naam</label><input name="name" required></div>
+      <div><label>Gebruikersnaam</label><input name="username" autocapitalize="none" required></div>
+      <div><label>Wachtwoord</label><input name="password" required minlength="6"></div>
+      <div><label>Rol</label><select name="role"><option value="student">Leerling</option><option value="admin">Ouder / docent</option></select></div>
+    </div><div class="error" id="err"></div><br><button>Toevoegen</button></form>`;
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    try { await api("users/create", Object.fromEntries(new FormData(e.target))); toast("Toegevoegd"); viewAdmin(); }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+  app.querySelectorAll("[data-pw]").forEach(b => b.onclick = async () => {
+    const pw = prompt(`Nieuw wachtwoord voor ${b.dataset.name} (min. 6 tekens):`);
+    if (!pw) return;
+    try { await api("users/password", { id: +b.dataset.pw, password: pw }); toast("Wachtwoord gewijzigd"); } catch (er) { toast(er.message); }
+  });
+  app.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`${b.dataset.name} en alle scores definitief verwijderen?`)) return;
+    try { await api("users/delete", { id: +b.dataset.del }); toast("Verwijderd"); viewAdmin(); } catch (er) { toast(er.message); }
+  });
+}
+
+// ---------- account ----------
+function viewAccount() {
+  app.innerHTML = `<h1>Account</h1><div class="card" style="max-width:420px">
+    <p>Ingelogd als <b>${esc(ME.name)}</b></p>
+    <form id="f"><label>Huidig wachtwoord</label><input name="old" type="password" required>
+    <label>Nieuw wachtwoord</label><input name="new" type="password" required minlength="6">
+    <div class="error" id="err"></div><br><button>Wachtwoord wijzigen</button></form>
+    <hr style="border:0;border-top:1px solid var(--line);margin:20px 0"><button class="secondary" id="out">Uitloggen</button></div>`;
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    try { await api("password", Object.fromEntries(new FormData(e.target))); toast("Wachtwoord gewijzigd"); e.target.reset(); }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+  $("#out").onclick = async () => { await api("logout", {}); location.hash = "#/"; render(); };
+}
+
+render();
