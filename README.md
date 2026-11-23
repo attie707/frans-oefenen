@@ -3,7 +3,23 @@
 A small French practice web app (être, avoir, -er verbs). It's pure Python with **no dependencies**
 and uses SQLite for storage. It uses about 20 MB of RAM.
 
-## Install on your Docker host (Proxmox LXC/VM)
+## Install on Proxmox (recommended)
+
+Run this in the **Proxmox host shell**. It creates a small Debian LXC (256 MB RAM, 2 GB disk) and installs the app as a service. Docker isn't needed.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/attie707/frans-oefenen/main/proxmox-lxc.sh)"
+```
+
+At the end it prints the address. Settings you can put in front of the command: `CTID=150 MEM=512 IP=192.168.1.50/24,gw=192.168.1.1 BRIDGE=vmbr0 STORAGE=local-lvm`.
+
+| Task | Command (on the Proxmox host) |
+|---|---|
+| Update | `pct exec <ID> -- update` |
+| Backup | `pct exec <ID> -- backup` |
+| Logs | `pct exec <ID> -- journalctl -u frans-oefenen -f` |
+
+## Alternative: install on an existing Docker host
 
 Run this on the Docker host (replace `<user>` with your GitHub name):
 
