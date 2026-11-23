@@ -222,3 +222,65 @@ def table(verb, pron):
             label = "j'" if (p == "je" and form[0] in VOWELS) else p
         rows.append({"pron": label, "form": form, "hl": p == hl})
     return {"verb": verb, "nl": NL[verb][0], "rows": rows}
+
+
+# ---------- luisteren ----------
+# In het Frans klinken veel vormen hetzelfde (il parle = ils parlent). sound_key() geeft
+# vormen die hetzelfde klinken dezelfde sleutel, zodat we die niet als 'fout' tegen elkaar zetten.
+def sound_key(verb, pron):
+    form = conjugate(verb, pron)
+    p = {"je": "je", "tu": "tu", "il": "il", "ils": "il", "elle": "el", "elles": "el",
+         "on": "on", "nous": "nous", "vous": "vous"}[pron]
+    if form[0] in VOWELS and pron in ("ils", "elles"):
+        p += "z"                      # liaison: ils_ont, elles_aiment
+    if verb in IRREGULAR:
+        f = {"es": "E", "est": "E", "a": "A", "as": "A"}.get(form, form)
+    else:
+        b = base_pron(pron)
+        f = "1" if b in ("je", "tu", "il", "ils") else b   # parle/parles/parlent klinken gelijk
+    return f"{verb}|{p}|{f}"
+
+
+def homophones(verb, pron):
+    key = sound_key(verb, pron)
+    return [p for p in PRONOUNS if sound_key(verb, p) == key]
+
+
+def make_listen_question(item_id, kind):
+    item = ITEMS[item_id]
+    verb, pron = item["verb"], item["pron"]
+    key = sound_key(verb, pron)
+    same = homophones(verb, pron)
+    q = {"item": item_id, "verb": verb, "pron": pron, "fmt": kind, "say": phrase(verb, pron)}
+    q["prompt"] = {"say": q["say"]}
+    if kind == "dictee":
+        q["accepted"] = list(dict.fromkeys(phrase(verb, p) for p in same))
+        q["answer"] = q["say"]
+        return q
+    # meerkeuze: wat betekent wat je hoort?
+    q["answer"] = nl_phrase(verb, pron)
+    q["accepted"] = list(dict.fromkeys(nl_phrase(verb, p) for p in same))
+    cands = [(verb, p) for p in PRONOUNS]
+    if verb in IRREGULAR:
+        other = "avoir" if verb == "être" else "être"
+        cands += [(other, p) for p in PRONOUNS]
+    pool = {}
+    for v, p in cands:
+        nl = nl_phrase(v, p)
+        if sound_key(v, p) != key and nl not in q["accepted"]:
+            pool[nl] = 1
+    opts = random.sample(list(pool), min(3, len(pool)))
+    # één andere werkwoordsbetekenis erbij, zodat hij ook het woord moet herkennen
+    others = [v for v in ER_VERBS if v != verb] if verb not in IRREGULAR else ["être", "avoir"]
+    for _ in range(10):
+        nl = nl_phrase(random.choice(others), pron)
+        if nl not in q["accepted"] and nl not in opts:
+            opts.append(nl)
+            break
+    while len(opts) < 4 and len(pool) > len(opts):
+        extra = random.choice([x for x in pool if x not in opts])
+        opts.append(extra)
+    opts.append(q["answer"])
+    random.shuffle(opts)
+    q["options"] = opts
+    return q

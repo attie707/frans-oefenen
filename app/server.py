@@ -91,6 +91,7 @@ def purge():
 
 
 # ---------------- leerlogica ----------------
+MODE_NAMES = {"mc": "Meerkeuze", "spell": "Spelling", "listen": "Luisteren", "dictee": "Dictee"}
 BOX_WEIGHT = {0: 3, 1: 10, 2: 5, 3: 2, 4: 1, 5: 0.5}
 
 
@@ -429,6 +430,13 @@ class Handler(BaseHTTPRequestHandler):
             lv = C.LEVELS[level - 1]
             item = pick_item(con, me["id"], "spell", lv["items"])
             q = C.make_question(item, lv["fmt"])
+        elif mode in ("listen", "dictee"):
+            focus = b.get("focus", "all")
+            pool = weak_items(con, me["id"]) if focus == "weak" else C.MC_FOCUS.get(focus, C.MC_FOCUS["all"])[1]
+            if len(pool) < 3:
+                pool, note = C.MC_FOCUS["all"][1], "Je hebt (nog) geen zwakke punten. We doen alles door elkaar."
+            item = pick_item(con, me["id"], mode, pool)
+            q = C.make_listen_question(item, "mc" if mode == "listen" else "dictee")
         else:
             raise ApiError(400, "Onbekende modus")
         qid = secrets.token_urlsafe(12)
@@ -463,7 +471,12 @@ class Handler(BaseHTTPRequestHandler):
                        ON CONFLICT(user_id,key) DO UPDATE SET box=excluded.box, seen=seen+1,
                        wrong=wrong+excluded.wrong, last_ts=excluded.last_ts""",
                     (uid, key, box, 1 if result < 2 else 0, int(time.time())))
-        prompt = q["prompt"].get("nl") if q["fmt"] == "translate" else f'{q["prompt"]["fr"]} ({q["prompt"]["inf"]})'
+        if q["fmt"] == "fill":
+            prompt = f'{q["prompt"]["fr"]} ({q["prompt"]["inf"]})'
+        elif "say" in q["prompt"]:
+            prompt = "🔊 " + q["say"]
+        else:
+            prompt = q["prompt"]["nl"]
         con.execute("INSERT INTO answers(user_id,ts,day,mode,level,item,verb,pron,prompt,given,expected,result) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (uid, int(time.time()), today(), q["mode"], q["level"], q["item"], q["verb"],
@@ -488,7 +501,8 @@ class Handler(BaseHTTPRequestHandler):
         con.execute("UPDATE users SET xp=xp+? WHERE id=?", (xp, uid))
         n_today = con.execute("SELECT COUNT(*) FROM answers WHERE user_id=? AND day=?", (uid, today())).fetchone()[0]
         return {"result": ["wrong", "almost", "correct"][result], "answer": q["answer"],
-                "accepted": q["accepted"], "say": q["say"], "table": C.table(q["verb"], q["pron"]),
+                "accepted": q["accepted"], "say": q["say"], "fmt": q["fmt"],
+                "nl": C.nl_phrase(q["verb"], q["pron"], C.ITEMS[q["item"]]["neg"]), "table": C.table(q["verb"], q["pron"]),
                 "xp_gained": xp, "xp": me["xp"] + xp, "today": n_today, "goal": DAILY_GOAL,
                 "unlocked": unlocked, "speed_score": speed_score}
 
@@ -538,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
                 weak.append({"fr": C.phrase(item["verb"], item["pron"], item["neg"]),
                              "nl": C.nl_phrase(item["verb"], item["pron"], item["neg"]),
                              "wrong": r["wrong"], "seen": r["seen"], "box": r["box"],
-                             "mode": "Meerkeuze" if r["key"].startswith("mc:") else "Spelling"})
+                             "mode": MODE_NAMES.get(r["key"].split(":", 1)[0], "")})
         mistakes = [dict(r) for r in con.execute(
             "SELECT ts, prompt, given, expected, result FROM answers WHERE user_id=? AND result<2 "
             "ORDER BY id DESC LIMIT 15", (uid,))]
@@ -561,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
         w.writerow(["leerling", "datum", "tijd", "onderdeel", "niveau", "vraag", "antwoord", "juist antwoord", "resultaat"])
         for r in con.execute(f"SELECT a.*, u.name FROM answers a JOIN users u ON u.id=a.user_id {where} ORDER BY a.id", args):
             w.writerow([r["name"], r["day"], time.strftime("%H:%M", time.localtime(r["ts"])),
-                        "Meerkeuze" if r["mode"] == "mc" else "Spelling", r["level"] or "",
+                        MODE_NAMES.get(r["mode"], r["mode"]), r["level"] or "",
                         r["prompt"], r["given"], r["expected"], ["fout", "bijna (accent)", "goed"][r["result"]]])
         data = "﻿" + buf.getvalue()   # BOM zodat Excel de accenten goed toont
         self.send(200, data, "text/csv; charset=utf-8",

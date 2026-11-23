@@ -31,10 +31,10 @@ function rank(xp) {
 let frVoice = null;
 function loadVoices() { const v = speechSynthesis.getVoices(); frVoice = v.find(x => x.lang === "fr-FR") || v.find(x => x.lang.startsWith("fr")) || null; }
 if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
-function say(text) {
+function say(text, rate = 0.9) {
   if (!("speechSynthesis" in window)) return toast("Je browser kan niet voorlezen");
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.lang = "fr-FR"; if (frVoice) u.voice = frVoice; u.rate = 0.9;
+  const u = new SpeechSynthesisUtterance(text); u.lang = "fr-FR"; if (frVoice) u.voice = frVoice; u.rate = rate;
   speechSynthesis.speak(u);
 }
 const sayBtn = text => `<button class="say" title="Laat horen" data-say="${esc(text)}">🔊</button>`;
@@ -57,7 +57,7 @@ async function render() {
   if (st.setup_needed) return viewSetup();
   if (!ME) return viewLogin();
   const [route, arg] = location.hash.replace(/^#\/?/, "").split("/");
-  const views = { "": viewHome, meerkeuze: viewMC, spelling: viewSpell, snel: viewSpeed, scores: viewScores, beheer: viewAdmin, account: viewAccount };
+  const views = { "": viewHome, meerkeuze: viewMC, spelling: viewSpell, snel: viewSpeed, luisteren: viewListen, scores: viewScores, beheer: viewAdmin, account: viewAccount };
   (views[route] || viewHome)(arg);
 }
 
@@ -109,6 +109,7 @@ async function viewHome() {
     <div class="grid">
       <a class="card tile" href="#/meerkeuze"><div class="ico">🎯</div><h3>Meerkeuze</h3><div class="muted small">Kies het goede antwoord uit 5. Toets 1–5 werkt ook.</div></a>
       <a class="card tile" href="#/spelling"><div class="ico">✍️</div><h3>Spelling</h3><div class="muted small">Zelf typen. Nu op niveau ${nextLevel.n}: ${esc(nextLevel.name)}</div></a>
+      <a class="card tile" href="#/luisteren"><div class="ico">🎧</div><h3>Luisteren</h3><div class="muted small">Hoor het Frans en kies wat het betekent, of schrijf het op (dictee).</div></a>
       <a class="card tile" href="#/snel"><div class="ico">⚡</div><h3>Snelheidsronde</h3><div class="muted small">60 seconden. Hoeveel heb jij goed?</div></a>
       <a class="card tile" href="#/scores"><div class="ico">📊</div><h3>Mijn scores</h3><div class="muted small">${h.weak_count ? `${h.weak_count} dingen om nog te oefenen` : "Bekijk je voortgang"}</div></a>
     </div>`;
@@ -224,6 +225,95 @@ async function viewSpell(level) {
     if (res.result === "correct") say(res.say);
     if (res.unlocked) toast(`🎉 Niveau ${res.unlocked.n} vrijgespeeld!`, 4000);
   }
+  next();
+}
+
+// ---------- luisteren ----------
+function listenFeedback(res, given) {
+  const ok = res.result === "correct";
+  const t = ok ? pick(PRAISE) : res.result === "almost" ? "Bijna! Let op de accenten" : pick(OOPS);
+  const same = res.fmt === "dictee" ? res.accepted : null;
+  return `<div class="feedback ${res.result} pop">
+    <div class="title">${ok ? "✅" : res.result === "almost" ? "🟡" : "❌"} ${esc(t)} ${res.xp_gained ? `<span class="small muted">+${res.xp_gained} XP</span>` : ""}</div>
+    ${!ok && given !== undefined && res.fmt === "dictee" ? `<div class="small muted">Jij: <s>${esc(given) || "(leeg)"}</s></div>` : ""}
+    <div>Je hoorde: <span class="sol">${esc(res.say)}</span> ${sayBtn(res.say)}</div>
+    <div class="muted">= ${esc(res.nl)}</div>
+    ${same && same.length > 1 ? `<div class="small" style="margin-top:6px">👂 Klinkt precies hetzelfde: <b>${same.map(esc).join("</b> en <b>")}</b>. Allebei goed!</div>` : ""}
+    ${!ok ? conjTable(res.table) : ""}
+  </div>`;
+}
+async function viewListen(arg) {
+  const [kind, focus] = (arg || "").split(":");
+  if (!kind || !focus) {
+    const h = await api("home");
+    const noVoice = "speechSynthesis" in window && speechSynthesis.getVoices().length && !frVoice;
+    app.innerHTML = `<h1>🎧 Luisteren</h1>
+      ${noVoice ? `<p class="error">Dit apparaat heeft geen Franse stem. Het kan raar klinken. Op een telefoon kun je in de instellingen een Franse stem downloaden.</p>` : ""}
+      <h2>Wat wil je doen?</h2>
+      <div class="grid">
+        <button class="card tile ${kind !== "dictee" ? "sel" : ""}" data-k="listen"><div class="ico">👂</div><h3>Wat hoor je?</h3><div class="muted small">Luister en kies de Nederlandse betekenis.</div></button>
+        <button class="card tile ${kind === "dictee" ? "sel" : ""}" data-k="dictee"><div class="ico">📝</div><h3>Dictee</h3><div class="muted small">Luister en schrijf het in het Frans op.</div></button>
+      </div>
+      <h2>Welke werkwoorden?</h2>
+      <div class="grid">${h.focus.map(f => `<button class="card tile" data-f="${f.key}"><h3>${esc(f.name)}</h3></button>`).join("")}</div>`;
+    let k = kind === "dictee" ? "dictee" : "listen";
+    app.querySelectorAll("[data-k]").forEach(b => b.onclick = () => {
+      k = b.dataset.k; app.querySelectorAll("[data-k]").forEach(x => x.classList.toggle("sel", x === b));
+    });
+    app.querySelectorAll("[data-f]").forEach(b => b.onclick = () => (location.hash = `#/luisteren/${k}:${b.dataset.f}`));
+    return;
+  }
+  const s = { n: 0, ok: 0 };
+  let q, answered = false;
+  const controls = `<div class="row" style="justify-content:center;margin-top:6px">
+      <button class="secondary" id="play">🔊 Nog eens</button><button class="secondary" id="slow">🐢 Langzaam</button></div>`;
+  async function next() {
+    answered = false;
+    q = await api("question", { mode: kind, focus });
+    const top = `<div class="qhead"><a href="#/luisteren/${kind}">← Stoppen</a><span class="small muted">${kind === "dictee" ? "Dictee" : "Wat hoor je?"}</span>${sessionBar(s)}</div>`;
+    const head = `${q.note ? `<p class="small muted">${esc(q.note)}</p>` : ""}<div class="prompt"><div style="font-size:54px">🎧</div><div class="muted">${kind === "dictee" ? "Schrijf op wat je hoort" : "Wat betekent dit?"}</div></div>${controls}`;
+    if (kind === "dictee") {
+      app.innerHTML = `${top}<div class="card">${head}
+        <form class="answer-row" id="f"><input id="inp" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="wat hoor je?"><button>OK</button></form>
+        ${accentBar()}<div id="fb"></div></div>`;
+      const inp = $("#inp"); bindAccents(inp); inp.focus();
+      $("#f").onsubmit = e => { e.preventDefault(); answered ? next() : answer(inp.value); };
+    } else {
+      app.innerHTML = `${top}<div class="card">${head}
+        <div class="options">${q.options.map((o, i) => `<button class="opt" data-i="${i}"><span class="n">${i + 1}</span>${esc(o)}</button>`).join("")}</div>
+        <div id="fb"></div></div>`;
+      app.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(q.options[+b.dataset.i], +b.dataset.i));
+    }
+    $("#play").onclick = () => say(q.prompt.say);
+    $("#slow").onclick = () => say(q.prompt.say, 0.55);
+    setTimeout(() => say(q.prompt.say), 250);
+  }
+  async function answer(given, idx) {
+    if (answered) return; answered = true;
+    const res = await api("answer", { qid: q.qid, answer: given });
+    s.n++; if (res.result === "correct") s.ok++;
+    $(".qhead .chip").outerHTML = sessionBar(s);
+    if (kind === "dictee") {
+      const inp = $("#inp"); inp.readOnly = true;
+      inp.style.borderColor = res.result === "correct" ? "var(--good)" : res.result === "almost" ? "var(--warn)" : "var(--bad)";
+    } else {
+      app.querySelectorAll(".opt").forEach((b, j) => {
+        b.disabled = true;
+        if (res.accepted.includes(q.options[j])) b.classList.add("right");
+        else if (j === idx) b.classList.add("wrong");
+      });
+    }
+    if (res.result === "wrong") $(".card").classList.add("shake");
+    $("#fb").innerHTML = listenFeedback(res, given) + `<button class="next" id="nx">Volgende ↵</button>`;
+    $("#nx").onclick = next;
+    (kind === "dictee" ? $("#inp") : $("#nx")).focus();
+  }
+  const key = e => {
+    if (kind !== "dictee" && !answered && q && /^[1-5]$/.test(e.key)) answer(q.options[+e.key - 1], +e.key - 1);
+    else if (kind !== "dictee" && answered && e.key === "Enter") { e.preventDefault(); next(); }
+  };
+  document.addEventListener("keydown", key);
+  cleanup = () => { document.removeEventListener("keydown", key); if ("speechSynthesis" in window) speechSynthesis.cancel(); };
   next();
 }
 

@@ -50,6 +50,7 @@ The first visitor can create the admin account, so do step 1 straight away.
 |---|---|
 | Meerkeuze | 5 options, keys 1–5 work. The wrong options are typical mistakes (ils sont/ils ont, tu est…). Mixes "nous ___ (avoir)" with Dutch→French. Focus on être/avoir, -er verbs, everything, or **zwakke punten** (only the ones he got wrong). |
 | Spelling | Typing, with 5 levels that unlock at 80% of the last 20 answers: être/avoir → -er verbs → full translations → tricky cases (mangeons, commençons, j'aime) → negation (je ne suis pas). Accent buttons for phones. A missing accent counts as "bijna" (almost). |
+| Luisteren | The browser reads French aloud (🔊, 🐢 slow). **Wat hoor je?**: choose the Dutch meaning. **Dictee**: write down what you hear. Forms that sound the same (il parle / ils parlent) are both accepted, and the feedback explains why. Needs a French voice on the device (standard on phones; on Windows install French under Language settings). |
 | Herhaling | Leitner system: each item sits in a box from 1 to 5. Wrong answers go back to box 1 and are asked much more often. |
 | Snelheidsronde | 60 seconds with a high score. The score is counted on the server, so it can't be faked. |
 | Motivation | XP, ranks (Débutant → Légende), daily goal of 20 questions, day streak, 🔊 pronunciation (browser voice). |
