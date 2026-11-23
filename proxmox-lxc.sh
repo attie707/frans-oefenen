@@ -24,6 +24,9 @@ CORES="${CORES:-1}"
 BRIDGE="${BRIDGE:-vmbr0}"
 IP="${IP:-dhcp}"
 PORT=8000
+# avoid locale warnings: the SSH session's LANG usually isn't installed in a fresh container
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+unset LANGUAGE
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()  { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
@@ -107,6 +110,7 @@ UNIT
 cat > /usr/local/bin/update <<'UPD'
 #!/usr/bin/env bash
 set -e
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 echo "Updating Frans oefenen..."
 git -C /opt/frans-oefenen pull --ff-only
 systemctl restart frans-oefenen
