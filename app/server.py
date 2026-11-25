@@ -65,12 +65,41 @@ def init_db():
             prompt TEXT, given TEXT, expected TEXT, result INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_answers_user ON answers(user_id, id);
         """)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
+        if "must_change" not in cols:
+            # bestaande accounts moeten bij de volgende keer inloggen een nieuw (sterk) wachtwoord kiezen
+            con.execute("ALTER TABLE users ADD COLUMN must_change INTEGER NOT NULL DEFAULT 1")
 
 
 def hash_pw(pw, salt=None):
     salt = salt or secrets.token_hex(16)
     h = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 200_000).hex()
     return h, salt
+
+
+ROLES = {"student": "Leerling", "teacher": "Docent / ouder", "admin": "Beheerder"}
+STAFF = ("teacher", "admin")
+PW_MIN = 10
+
+
+def password_problem(pw, username=""):
+    """Geeft een foutmelding als het wachtwoord niet sterk genoeg is, anders None."""
+    missing = []
+    if len(pw) < PW_MIN:
+        missing.append(f"minstens {PW_MIN} tekens")
+    if not re.search(r"[a-z]", pw):
+        missing.append("een kleine letter")
+    if not re.search(r"[A-Z]", pw):
+        missing.append("een hoofdletter")
+    if not re.search(r"[0-9]", pw):
+        missing.append("een cijfer")
+    if not re.search(r"[^A-Za-z0-9]", pw):
+        missing.append("een speciaal teken (zoals ! ? # @)")
+    if missing:
+        return "Wachtwoord mist: " + ", ".join(missing)
+    if username and username.lower() in pw.lower():
+        return "Het wachtwoord mag je gebruikersnaam niet bevatten"
+    return None
 
 
 def today():
@@ -225,7 +254,7 @@ class Handler(BaseHTTPRequestHandler):
         c = SimpleCookie(self.headers.get("Cookie") or "")
         return c["sid"].value if "sid" in c else None
 
-    def user(self, con, required=True, admin=False):
+    def user(self, con, required=True, admin=False, staff=False, pending_ok=False):
         tok = self.token()
         u = None
         if tok:
@@ -233,17 +262,23 @@ class Handler(BaseHTTPRequestHandler):
                             "WHERE s.token=? AND s.created>?", (tok, time.time() - SESSION_DAYS * 86400)).fetchone()
         if required and not u:
             raise ApiError(401, "Niet ingelogd")
+        if u and u["must_change"] and not pending_ok:
+            raise ApiError(403, "Kies eerst een nieuw wachtwoord")
         if admin and u["role"] != "admin":
-            raise ApiError(403, "Alleen voor ouders/docenten")
+            raise ApiError(403, "Alleen voor de beheerder")
+        if staff and u["role"] not in STAFF:
+            raise ApiError(403, "Alleen voor docenten en ouders")
         return u
 
     def target_user(self, con, me, qs):
-        """Welke leerling bekijken we? Leerlingen alleen zichzelf, beheerders iedereen."""
+        """Welke leerling bekijken we? Leerlingen alleen zichzelf, docenten/ouders/beheerders iedereen."""
         uid = qs.get("user", [None])[0]
-        if uid and me["role"] == "admin":
+        if uid and me["role"] in STAFF:
             u = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
             if not u:
                 raise ApiError(404, "Gebruiker niet gevonden")
+            if me["role"] == "teacher" and u["role"] != "student" and u["id"] != me["id"]:
+                raise ApiError(403, "Docenten kunnen alleen leerlingen bekijken")
             return u
         return me
 
@@ -297,29 +332,31 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------- account ----------------
     def api_get_state(self, con, qs):
         setup = con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        u = None if setup else self.user(con, required=False)
-        return {"setup_needed": setup, "tts": SPEECH.engine,
-                "user": {"id": u["id"], "name": u["name"], "role": u["role"]} if u else None}
+        u = None if setup else self.user(con, required=False, pending_ok=True)
+        return {"setup_needed": setup, "tts": SPEECH.engine, "pw_min": PW_MIN,
+                "user": {"id": u["id"], "name": u["name"], "username": u["username"], "role": u["role"],
+                         "role_name": ROLES.get(u["role"], u["role"]), "must_change": bool(u["must_change"])} if u else None}
 
     def api_post_setup(self, con, qs):
         if con.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
             raise ApiError(400, "Er is al een beheerder")
         b = self.body()
-        return self._create_user(con, b, role="admin", login=True)
+        return self._create_user(con, b, role="admin", login=True, must_change=0)
 
-    def _create_user(self, con, b, role, login=False):
+    def _create_user(self, con, b, role, login=False, must_change=1):
         username = (b.get("username") or "").strip().lower()
         name = (b.get("name") or "").strip() or username
         pw = b.get("password") or ""
         if not re.fullmatch(r"[a-z0-9._-]{2,30}", username):
             raise ApiError(400, "Gebruikersnaam: 2-30 tekens, alleen letters, cijfers, . _ -")
-        if len(pw) < 6:
-            raise ApiError(400, "Wachtwoord moet minstens 6 tekens zijn")
+        problem = password_problem(pw, username)
+        if problem:
+            raise ApiError(400, problem)
         if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
             raise ApiError(400, "Die gebruikersnaam bestaat al")
         h, salt = hash_pw(pw)
-        cur = con.execute("INSERT INTO users(username,name,role,pw_hash,salt,created) VALUES(?,?,?,?,?,?)",
-                          (username, name[:40], role, h, salt, int(time.time())))
+        cur = con.execute("INSERT INTO users(username,name,role,pw_hash,salt,created,must_change) VALUES(?,?,?,?,?,?,?)",
+                          (username, name[:40], role, h, salt, int(time.time()), must_change))
         if login:
             return self._login(con, cur.lastrowid)
         return {"ok": True, "id": cur.lastrowid}
@@ -352,14 +389,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, {"ok": True}, headers={"Set-Cookie": self.cookie("", 0)})
 
     def api_post_password(self, con, qs):
-        me = self.user(con)
+        me = self.user(con, pending_ok=True)
         b = self.body()
-        if hash_pw(b.get("old") or "", me["salt"])[0] != me["pw_hash"]:
+        old, new = b.get("old") or "", b.get("new") or ""
+        if not secrets.compare_digest(hash_pw(old, me["salt"])[0], me["pw_hash"]):
             raise ApiError(400, "Huidig wachtwoord klopt niet")
-        if len(b.get("new") or "") < 6:
-            raise ApiError(400, "Nieuw wachtwoord moet minstens 6 tekens zijn")
-        h, salt = hash_pw(b["new"])
-        con.execute("UPDATE users SET pw_hash=?, salt=? WHERE id=?", (h, salt, me["id"]))
+        problem = password_problem(new, me["username"])
+        if problem:
+            raise ApiError(400, problem)
+        if new == old:
+            raise ApiError(400, "Kies een ander wachtwoord dan het oude")
+        h, salt = hash_pw(new)
+        con.execute("UPDATE users SET pw_hash=?, salt=?, must_change=0 WHERE id=?", (h, salt, me["id"]))
+        # andere apparaten uitloggen, dit apparaat blijft ingelogd
+        con.execute("DELETE FROM sessions WHERE user_id=? AND token<>?", (me["id"], self.token()))
         return {"ok": True}
 
     def api_get_tts(self, con, qs):
@@ -371,27 +414,55 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- beheer ----------------
     def api_get_users(self, con, qs):
-        self.user(con, admin=True)
+        me = self.user(con, staff=True)
+        week = (dt.date.today() - dt.timedelta(days=6)).isoformat()
         rows = con.execute("""
-            SELECT u.id, u.username, u.name, u.role, u.xp,
+            SELECT u.id, u.username, u.name, u.role, u.xp, u.must_change,
                    (SELECT MAX(ts) FROM answers a WHERE a.user_id=u.id) AS last_ts,
                    (SELECT COUNT(*) FROM answers a WHERE a.user_id=u.id AND a.day=?) AS today,
+                   (SELECT COUNT(*) FROM answers a WHERE a.user_id=u.id AND a.day>=?) AS week,
+                   (SELECT ROUND(50.0*SUM(result)/COUNT(*)) FROM answers a WHERE a.user_id=u.id AND a.day>=?) AS week_pct,
                    (SELECT COUNT(*) FROM answers a WHERE a.user_id=u.id) AS total
-            FROM users u ORDER BY u.role, u.name""", (today(),)).fetchall()
-        return [dict(r) for r in rows]
+            FROM users u ORDER BY CASE u.role WHEN 'student' THEN 0 WHEN 'teacher' THEN 1 ELSE 2 END, u.name""",
+                           (today(), week, week)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["role_name"] = ROLES.get(d["role"], d["role"])
+            d["streak"] = streak(con, d["id"])
+            if me["role"] != "admin" and d["role"] != "student":
+                continue          # docenten zien alleen leerlingen
+            out.append(d)
+        return out
 
     def api_post_users_create(self, con, qs):
         self.user(con, admin=True)
         b = self.body()
-        return self._create_user(con, b, role="admin" if b.get("role") == "admin" else "student")
+        role = b.get("role") if b.get("role") in ROLES else "student"
+        return self._create_user(con, b, role=role)
+
+    def api_post_users_role(self, con, qs):
+        me = self.user(con, admin=True)
+        b = self.body()
+        role = b.get("role")
+        if role not in ROLES:
+            raise ApiError(400, "Onbekende rol")
+        if b.get("id") == me["id"] and role != "admin":
+            raise ApiError(400, "Je kunt je eigen beheerdersrol niet weghalen")
+        con.execute("UPDATE users SET role=? WHERE id=?", (role, b.get("id")))
+        return {"ok": True}
 
     def api_post_users_password(self, con, qs):
         self.user(con, admin=True)
         b = self.body()
-        if len(b.get("password") or "") < 6:
-            raise ApiError(400, "Wachtwoord moet minstens 6 tekens zijn")
+        u = con.execute("SELECT username FROM users WHERE id=?", (b.get("id"),)).fetchone()
+        if not u:
+            raise ApiError(404, "Gebruiker niet gevonden")
+        problem = password_problem(b.get("password") or "", u["username"])
+        if problem:
+            raise ApiError(400, problem)
         h, salt = hash_pw(b["password"])
-        con.execute("UPDATE users SET pw_hash=?, salt=? WHERE id=?", (h, salt, b.get("id")))
+        con.execute("UPDATE users SET pw_hash=?, salt=?, must_change=1 WHERE id=?", (h, salt, b.get("id")))
         con.execute("DELETE FROM sessions WHERE user_id=?", (b.get("id"),))
         return {"ok": True}
 
@@ -574,8 +645,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_get_export_csv(self, con, qs):
         me = self.user(con)
-        if qs.get("user", [""])[0] == "all" and me["role"] == "admin":
-            where, args, fname = "", (), "alle-leerlingen"
+        if qs.get("user", [""])[0] == "all" and me["role"] in STAFF:
+            where, args, fname = "WHERE u.role='student'", (), "alle-leerlingen"
         else:
             u = self.target_user(con, me, qs)
             where, args, fname = "WHERE a.user_id=?", (u["id"],), u["username"]

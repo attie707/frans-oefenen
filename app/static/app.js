@@ -10,6 +10,7 @@ async function api(path, body) {
   const r = await fetch("/api/" + path, opt);
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && path !== "login") { ME = null; location.hash = "#/"; render(); throw new Error(data.error); }
+  if (r.status === 403 && data.error === "Kies eerst een nieuw wachtwoord") { render(); throw new Error(data.error); }
   if (!r.ok) throw new Error(data.error || "Er ging iets mis");
   return data;
 }
@@ -68,14 +69,87 @@ async function render() {
   if (cleanup) { cleanup(); cleanup = null; }
   const st = await api("state").catch(() => ({}));
   ME = st.user;
+  PW_MIN = st.pw_min || 10;
   TTS_SERVER = !!st.tts;
+  const staff = !!ME && (ME.role === "teacher" || ME.role === "admin");
   $("#nav").hidden = !ME;
   $("#nav-admin").hidden = !(ME && ME.role === "admin");
+  $("#nav-staff").hidden = !staff;
+  $("#nav-practice").hidden = !staff;
+  $("#nav-scores").hidden = staff;
+  if (ME) $("#who").innerHTML = `<span class="nm">${esc(ME.name)}</span> <span class="role ${ME.role}">${esc(ME.role_name)}</span>`;
   if (st.setup_needed) return viewSetup();
   if (!ME) return viewLogin();
+  if (ME.must_change) { $("#nav").hidden = true; return viewForceChange(); }
   const [route, arg] = location.hash.replace(/^#\/?/, "").split("/");
-  const views = { "": viewHome, meerkeuze: viewMC, spelling: viewSpell, snel: viewSpeed, luisteren: viewListen, scores: viewScores, beheer: viewAdmin, account: viewAccount };
-  (views[route] || viewHome)(arg);
+  const views = { "": staff ? viewOverview : viewHome, oefenen: viewHome, leerlingen: viewOverview,
+    meerkeuze: viewMC, spelling: viewSpell, snel: viewSpeed, luisteren: viewListen, scores: viewScores, beheer: viewAdmin, account: viewAccount };
+  (views[route] || views[""])(arg);
+}
+
+// ---------- wachtwoorden ----------
+let PW_MIN = 10;
+const PW_RULES = [
+  [pw => pw.length >= PW_MIN, () => `Minstens ${PW_MIN} tekens`],
+  [pw => /[a-z]/.test(pw), () => "Een kleine letter"],
+  [pw => /[A-Z]/.test(pw), () => "Een hoofdletter"],
+  [pw => /[0-9]/.test(pw), () => "Een cijfer"],
+  [pw => /[^A-Za-z0-9]/.test(pw), () => "Een speciaal teken, zoals ! ? # @ -"],
+];
+function pwChecklist(input, username = () => "") {
+  const ul = document.createElement("ul"); ul.className = "pwcheck";
+  const draw = () => {
+    const pw = input.value, u = (typeof username === "function" ? username() : username).toLowerCase();
+    ul.innerHTML = PW_RULES.map(([t, l]) => `<li class="${t(pw) ? "ok" : ""}">${esc(l())}</li>`).join("") +
+      `<li class="${pw && !(u && pw.toLowerCase().includes(u)) ? "ok" : ""}">Niet je gebruikersnaam</li>`;
+  };
+  input.addEventListener("input", draw);
+  (input.parentElement.classList.contains("row") ? input.parentElement : input).after(ul); draw();
+}
+function makePassword() {
+  const w = ["Soleil", "Chat", "Pomme", "Fromage", "Lune", "Velo", "Plage", "Livre", "Arbre", "Train", "Crepe", "Nuage", "Etoile", "Bateau"];
+  const r = n => crypto.getRandomValues(new Uint32Array(1))[0] % n;
+  const a = r(w.length), b = (a + 1 + r(w.length - 1)) % w.length;
+  return w[a] + "-" + w[b] + (10 + r(90)) + "!?#@"[r(4)];
+}
+function viewForceChange() {
+  app.innerHTML = `<div class="card" style="max-width:440px;margin:30px auto">
+    <h1>🔒 Nieuw wachtwoord</h1>
+    <div class="banner">Hallo ${esc(ME.name)}! Kies eerst een nieuw, sterk wachtwoord voordat je verder gaat.</div>
+    <form id="f"><label>Huidig (tijdelijk) wachtwoord</label><input name="old" type="password" autocomplete="current-password" required>
+    <label>Nieuw wachtwoord</label><input name="new" id="pw1" type="password" autocomplete="new-password" required>
+    <label>Nieuw wachtwoord nog een keer</label><input id="pw2" type="password" autocomplete="new-password" required>
+    <div class="error" id="err"></div><br><button style="width:100%">Opslaan en verder</button></form>
+    <p class="center"><button class="link" id="out">Uitloggen</button></p></div>`;
+  pwChecklist($("#pw1"), ME.username);
+  $("#f").onsubmit = async e => {
+    e.preventDefault();
+    if ($("#pw1").value !== $("#pw2").value) return ($("#err").textContent = "De twee nieuwe wachtwoorden zijn niet hetzelfde");
+    try { await api("password", { old: e.target.old.value, new: $("#pw1").value }); toast("Wachtwoord opgeslagen 👍"); location.hash = "#/"; render(); }
+    catch (er) { $("#err").textContent = er.message; }
+  };
+  $("#out").onclick = async () => { await api("logout", {}); location.hash = "#/"; render(); };
+}
+
+// ---------- overzicht voor docent / ouder ----------
+async function viewOverview() {
+  if (!(ME.role === "teacher" || ME.role === "admin")) { location.hash = "#/"; return; }
+  const users = (await api("users")).filter(u => u.role === "student");
+  const ago = ts => { if (!ts) return "nog nooit"; const d = Math.floor((Date.now() / 1000 - ts) / 86400); return d === 0 ? "vandaag" : d === 1 ? "gisteren" : `${d} dagen geleden`; };
+  app.innerHTML = `<div class="spread"><h1>👩‍🏫 Leerlingen</h1>
+      ${users.length ? `<a class="btn secondary" href="/api/export.csv?user=all">⬇ Exporteer alles (CSV)</a>` : ""}</div>
+    <p class="muted">Je bent ingelogd als <span class="role ${ME.role}">${esc(ME.role_name)}</span>. Klik op een leerling om de voortgang te bekijken.</p>
+    ${users.length ? `<div class="grid">${users.map(u => `<a class="card tile" href="#/scores/${u.id}">
+      <div class="spread"><h3>🎒 ${esc(u.name)}</h3><span class="small muted">${esc(u.username)}</span></div>
+      <div class="chips" style="margin:8px 0 4px">
+        <span class="chip">📅 ${ago(u.last_ts)}</span>
+        <span class="chip">🔥 ${u.streak}</span>
+        <span class="chip">⭐ ${u.xp}</span>
+      </div>
+      <div class="small">Vandaag: <b>${u.today}</b> vragen · deze week: <b>${u.week}</b>${u.week ? ` (${u.week_pct}% goed)` : ""} · totaal: ${u.total}</div>
+      ${u.must_change ? `<div class="small muted" style="margin-top:6px">🔒 moet nog een nieuw wachtwoord kiezen</div>` : ""}
+      </a>`).join("")}</div>`
+      : `<div class="card"><p>Er zijn nog geen leerlingen.</p>${ME.role === "admin" ? `<a class="btn" href="#/beheer">Leerling toevoegen</a>` : `<p class="muted">Vraag de beheerder om een leerling toe te voegen.</p>`}</div>`}`;
 }
 
 // ---------- inloggen ----------
@@ -84,8 +158,9 @@ function viewSetup() {
     <h1>Welkom! 👋</h1><p class="muted">Maak eerst een beheerdersaccount aan (voor ouder of docent). Daarna kun je leerlingen toevoegen.</p>
     <form id="f"><label>Naam</label><input name="name" required>
     <label>Gebruikersnaam</label><input name="username" autocapitalize="none" required>
-    <label>Wachtwoord (min. 6 tekens)</label><input name="password" type="password" required>
+    <label>Wachtwoord</label><input name="password" id="pw1" type="password" autocomplete="new-password" required>
     <div class="error" id="err"></div><br><button>Account aanmaken</button></form></div>`;
+  pwChecklist($("#pw1"), () => $("[name=username]").value);
   $("#f").onsubmit = async e => {
     e.preventDefault();
     try { await api("setup", Object.fromEntries(new FormData(e.target))); location.hash = "#/beheer"; render(); }
@@ -390,6 +465,7 @@ async function viewScores(uid) {
   const self = !uid || +uid === ME.id;
   const heatRows = Object.entries(s.heat);
   app.innerHTML = `
+    ${self ? "" : `<a href="#/leerlingen">← Alle leerlingen</a>`}
     <div class="spread"><h1>📊 ${self ? "Mijn scores" : "Scores van " + esc(s.user.name)}</h1>
       <a class="btn secondary" href="/api/export.csv${uid ? `?user=${encodeURIComponent(uid)}` : ""}">⬇ Exporteer (CSV)</a></div>
     <div class="chips">
@@ -437,34 +513,48 @@ function bindTips() {
 }
 
 // ---------- beheer ----------
-async function viewAdmin() {
+async function viewAdmin(msg) {
   if (ME.role !== "admin") { location.hash = "#/"; return; }
   const users = await api("users");
   const ago = ts => { if (!ts) return "nooit"; const d = Math.floor((Date.now() / 1000 - ts) / 86400); return d === 0 ? "vandaag" : d === 1 ? "gisteren" : `${d} dagen geleden`; };
-  app.innerHTML = `<div class="spread"><h1>⚙️ Beheer</h1><a class="btn secondary" href="/api/export.csv?user=all">⬇ Export alles (CSV)</a></div>
+  const roleSel = u => `<select data-role="${u.id}" ${u.id === ME.id ? "disabled title='Je eigen rol kun je niet veranderen'" : ""}>
+      ${[["student", "🎒 Leerling"], ["teacher", "👩‍🏫 Docent / ouder"], ["admin", "🔑 Beheerder"]].map(([k, l]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  app.innerHTML = `<div class="spread"><h1>⚙️ Beheer</h1><a class="btn secondary" href="/api/export.csv?user=all">⬇ Export leerlingen (CSV)</a></div>
+    ${msg ? `<div class="banner">${msg}</div>` : ""}
+    <p class="small muted"><b>Leerling</b>: oefent en ziet alleen eigen scores. <b>Docent / ouder</b>: ziet de voortgang van alle leerlingen. <b>Beheerder</b>: kan ook accounts beheren.</p>
     <div class="card"><div class="tablewrap"><table class="list"><tr><th>Naam</th><th>Rol</th><th>Vandaag</th><th>Totaal</th><th>Laatst actief</th><th></th></tr>
-    ${users.map(u => `<tr><td><b>${esc(u.name)}</b><div class="small muted">${esc(u.username)}</div></td><td>${u.role === "admin" ? "ouder/docent" : "leerling"}</td>
+    ${users.map(u => `<tr><td><b>${esc(u.name)}</b><div class="small muted">${esc(u.username)}${u.must_change ? " · 🔒 nieuw wachtwoord nodig" : ""}</div></td><td>${roleSel(u)}</td>
       <td>${u.today}</td><td>${u.total}</td><td class="small">${ago(u.last_ts)}</td>
-      <td><div class="row"><a class="btn" style="padding:6px 10px" href="#/scores/${u.id}">Scores</a>
-      <button class="link" data-pw="${u.id}" data-name="${esc(u.name)}">Wachtwoord</button>
+      <td><div class="row">${u.role === "student" ? `<a class="btn" style="padding:6px 10px" href="#/scores/${u.id}">Scores</a>` : ""}
+      <button class="link" data-pw="${u.id}" data-name="${esc(u.name)}">Tijdelijk wachtwoord</button>
       ${u.id !== ME.id ? `<button class="link" style="color:var(--bad)" data-del="${u.id}" data-name="${esc(u.name)}">Verwijder</button>` : ""}</div></td></tr>`).join("")}
     </table></div></div>
-    <h2>Leerling toevoegen</h2>
+    <h2>Account toevoegen</h2>
     <form class="card" id="f"><div class="grid">
       <div><label>Naam</label><input name="name" required></div>
       <div><label>Gebruikersnaam</label><input name="username" autocapitalize="none" required></div>
-      <div><label>Wachtwoord</label><input name="password" required minlength="6"></div>
-      <div><label>Rol</label><select name="role"><option value="student">Leerling</option><option value="admin">Ouder / docent</option></select></div>
-    </div><div class="error" id="err"></div><br><button>Toevoegen</button></form>`;
+      <div><label>Rol</label><select name="role"><option value="student">🎒 Leerling</option><option value="teacher">👩‍🏫 Docent / ouder</option><option value="admin">🔑 Beheerder</option></select></div>
+      <div><label>Tijdelijk wachtwoord</label><div class="row" style="flex-wrap:nowrap"><input name="password" id="newpw" required><button type="button" class="secondary" id="gen" title="Nieuw voorstel">🎲</button></div></div>
+    </div><p class="small muted">Bij de eerste keer inloggen moet de gebruiker zelf een nieuw wachtwoord kiezen.</p>
+    <div class="error" id="err"></div><button>Toevoegen</button></form>`;
+  const np = $("#newpw"); np.value = makePassword();
+  pwChecklist(np, () => $("#f [name=username]").value);
+  $("#gen").onclick = () => { np.value = makePassword(); np.dispatchEvent(new Event("input")); };
   $("#f").onsubmit = async e => {
     e.preventDefault();
-    try { await api("users/create", Object.fromEntries(new FormData(e.target))); toast("Toegevoegd"); viewAdmin(); }
+    const d = Object.fromEntries(new FormData(e.target));
+    try { await api("users/create", d); viewAdmin(`✅ <b>${esc(d.name)}</b> is toegevoegd. Gebruikersnaam: <b>${esc(d.username.trim().toLowerCase())}</b><br>Tijdelijk wachtwoord: <span class="temp-pw">${esc(d.password)}</span>`); }
     catch (er) { $("#err").textContent = er.message; }
   };
+  app.querySelectorAll("[data-role]").forEach(sel => sel.onchange = async () => {
+    try { await api("users/role", { id: +sel.dataset.role, role: sel.value }); toast("Rol aangepast"); viewAdmin(); }
+    catch (er) { toast(er.message); viewAdmin(); }
+  });
   app.querySelectorAll("[data-pw]").forEach(b => b.onclick = async () => {
-    const pw = prompt(`Nieuw wachtwoord voor ${b.dataset.name} (min. 6 tekens):`);
-    if (!pw) return;
-    try { await api("users/password", { id: +b.dataset.pw, password: pw }); toast("Wachtwoord gewijzigd"); } catch (er) { toast(er.message); }
+    const pw = makePassword();
+    if (!confirm(`${b.dataset.name} een nieuw tijdelijk wachtwoord geven? Diegene wordt uitgelogd en moet daarna zelf een nieuw wachtwoord kiezen.`)) return;
+    try { await api("users/password", { id: +b.dataset.pw, password: pw }); viewAdmin(`🔑 Tijdelijk wachtwoord voor <b>${esc(b.dataset.name)}</b>: <span class="temp-pw">${esc(pw)}</span>`); }
+    catch (er) { toast(er.message); }
   });
   app.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
     if (!confirm(`${b.dataset.name} en alle scores definitief verwijderen?`)) return;
@@ -474,15 +564,18 @@ async function viewAdmin() {
 
 // ---------- account ----------
 function viewAccount() {
-  app.innerHTML = `<h1>Account</h1><div class="card" style="max-width:420px">
-    <p>Ingelogd als <b>${esc(ME.name)}</b></p>
-    <form id="f"><label>Huidig wachtwoord</label><input name="old" type="password" required>
-    <label>Nieuw wachtwoord</label><input name="new" type="password" required minlength="6">
+  app.innerHTML = `<h1>Account</h1><div class="card" style="max-width:440px">
+    <p>Ingelogd als <b>${esc(ME.name)}</b> (${esc(ME.username)}) <span class="role ${ME.role}">${esc(ME.role_name)}</span></p>
+    <form id="f"><label>Huidig wachtwoord</label><input name="old" type="password" autocomplete="current-password" required>
+    <label>Nieuw wachtwoord</label><input id="pw1" type="password" autocomplete="new-password" required>
+    <label>Nieuw wachtwoord nog een keer</label><input id="pw2" type="password" autocomplete="new-password" required>
     <div class="error" id="err"></div><br><button>Wachtwoord wijzigen</button></form>
     <hr style="border:0;border-top:1px solid var(--line);margin:20px 0"><button class="secondary" id="out">Uitloggen</button></div>`;
+  pwChecklist($("#pw1"), ME.username);
   $("#f").onsubmit = async e => {
     e.preventDefault();
-    try { await api("password", Object.fromEntries(new FormData(e.target))); toast("Wachtwoord gewijzigd"); e.target.reset(); }
+    if ($("#pw1").value !== $("#pw2").value) return ($("#err").textContent = "De twee nieuwe wachtwoorden zijn niet hetzelfde");
+    try { await api("password", { old: e.target.old.value, new: $("#pw1").value }); toast("Wachtwoord gewijzigd"); e.target.reset(); $("#pw1").dispatchEvent(new Event("input")); }
     catch (er) { $("#err").textContent = er.message; }
   };
   $("#out").onclick = async () => { await api("logout", {}); location.hash = "#/"; render(); };

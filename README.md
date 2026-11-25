@@ -56,6 +56,17 @@ The first visitor can create the admin account, so do step 1 straight away.
 | Motivation | XP, ranks (Débutant → Légende), daily goal of 20 questions, day streak, 🔊 pronunciation (browser voice). |
 | Scores | 14-day chart, verb × person grid, weak points, recent mistakes, **CSV export** (opens correctly in Excel). Admins can view every student. |
 
+## Roles and passwords
+| Role | Can do |
+|---|---|
+| 🎒 **Leerling** (student) | Practise and see their own scores |
+| 👩‍🏫 **Docent / ouder** (teacher/parent) | See the progress of all students and export it. Starts on the student overview and can also practise. |
+| 🔑 **Beheerder** (administrator) | Everything above, plus adding accounts, changing roles and resetting passwords |
+
+Passwords need at least 10 characters, with a lowercase letter, a capital letter, a digit and a special character,
+and they may not contain the username. New accounts and reset passwords are **temporary**: at the first login the user
+has to choose their own password. After this update, all existing accounts have to choose a new password once.
+
 ## Speech
 - **Piper** (installed automatically, free and local): voice `fr_FR-siwis-medium`.
 - **Azure neural voices** (optional, most natural: `fr-FR-DeniseNeural`): put `AZURE_TTS_KEY=...` and
